@@ -335,7 +335,7 @@ describe('derivePinnedSessions', () => {
     expect(rows[1]).toMatchObject({ running: true })
   })
 
-  it('never surfaces unknown, archived, subagent-origin, blank, or filtered ids', () => {
+  it('never surfaces unknown, archived, subagent-origin, or blank ids', () => {
     const owned = summary('owned', 1)
     const archivedRow = summary('archived', 2)
     const subagent = { ...summary('subagent', 3), origin: 'subagent' as const }
@@ -346,10 +346,9 @@ describe('derivePinnedSessions', () => {
       current: currentBlank.id,
     }
     const ids = [owned.id, archivedRow.id, subagent.id, currentBlank.id, running.id, sid('missing')]
+    // The status filter never applies here: a running row stays pinned.
     expect(derivePinnedSessions(sessions, archived('archived'), ids).map(row => row.id))
       .toEqual([owned.id, running.id])
-    expect(derivePinnedSessions(sessions, archived('archived'), ids, 'completed').map(row => row.id))
-      .toEqual([owned.id])
   })
 })
 

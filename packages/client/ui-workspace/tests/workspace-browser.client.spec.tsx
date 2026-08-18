@@ -308,7 +308,7 @@ describe('WorkspaceBrowser', () => {
     expect(b.store.getSnapshot().sessionOrderByAccount[FLAT_SESSION_ORDER_KEY]).toEqual(['one', 'two', 'three'])
   })
 
-  it('applies the status filter inside the Pinned section', () => {
+  it('keeps the Pinned section visible under every status filter', () => {
     const running = summary('running-s', 2, { running: true })
     const idle = summary('idle-s', 1)
     const sessions = sessionState([running, idle])
@@ -325,8 +325,8 @@ describe('WorkspaceBrowser', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '视图选项' }))
     fireEvent.click(screen.getByRole('menuitem', { name: '已完成' }))
-    // The running pinned row is hidden; the idle pinned row stays.
-    expect(screen.queryByText('running-s')).toBeNull()
+    // Both pinned rows stay visible; the group rows follow the filter.
+    expect(screen.getByText('running-s')).toBeTruthy()
     expect(screen.getByText('idle-s')).toBeTruthy()
     expect(b.store.getSnapshot().pinnedSessionIds).toEqual(['idle-s', 'running-s'])
   })

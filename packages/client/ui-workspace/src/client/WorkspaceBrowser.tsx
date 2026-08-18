@@ -379,8 +379,8 @@ function SessionTree({
     [list, orderedWorkspaces, archivedSessionIds, expandedGroups, sessionOrderByAccount, statusFilter, pinnedSessionIds],
   )
   const pinnedRows = useMemo(
-    () => derivePinnedSessions(list, archivedSessionIds, pinnedSessionIds, statusFilter),
-    [list, archivedSessionIds, pinnedSessionIds, statusFilter],
+    () => derivePinnedSessions(list, archivedSessionIds, pinnedSessionIds),
+    [list, archivedSessionIds, pinnedSessionIds],
   )
   const now = Date.now()
   const commitSessionDrag = (activeDrag: DragState, over: NonNullable<DragState['over']>): void => {
@@ -645,8 +645,8 @@ function FlatList({
     [list, archivedSessionIds, statusFilter, pinnedSessionIds],
   )
   const pinnedRows = useMemo(
-    () => derivePinnedSessions(list, archivedSessionIds, pinnedSessionIds, statusFilter),
-    [list, archivedSessionIds, pinnedSessionIds, statusFilter],
+    () => derivePinnedSessions(list, archivedSessionIds, pinnedSessionIds),
+    [list, archivedSessionIds, pinnedSessionIds],
   )
   const sessionIds = useMemo(() => baseRows.map(row => row.id), [baseRows])
   const previousOrderBy = useRef(orderBy)

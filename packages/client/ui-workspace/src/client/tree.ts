@@ -330,19 +330,20 @@ export function deriveGroups(
 /**
  * Derive the browser's Pinned section: pinned Sessions in pin order (newest
  * pin first), restricted to rows that would otherwise be visible — archived,
- * subagent-origin, blank, and status-filtered rows never appear. The section
- * is a pure projection: the pinned set and every order account stay untouched.
+ * subagent-origin, and blank rows never appear. The session-status filter
+ * does not apply: pinning is the user's explicit keep-in-view intent, so the
+ * section always shows every visible pinned row regardless of the selected
+ * filter. The section is a pure projection: the pinned set and every order
+ * account stay untouched.
  * @param list - sessions list snapshot.
  * @param archivedSessionIds - registry-global archive set.
  * @param pinnedSessionIds - browser-local pinned set in pin order.
- * @param filter - selected session-status filter (default: every visible row).
  * @returns pinned rows in render order.
  */
 export function derivePinnedSessions(
   list: SessionListState,
   archivedSessionIds: readonly SessionId[],
   pinnedSessionIds: readonly SessionId[],
-  filter: SessionStatusFilter = 'all',
 ): SessionNode[] {
   const archived = new Set(archivedSessionIds)
   const descendants = indexSubagentDescendants(list.byId)
@@ -351,9 +352,7 @@ export function derivePinnedSessions(
     const summary = list.byId[id]
     // Blank rows carry no menu and can never be pinned; exclude them outright.
     if (summary === undefined || summary.blank || !sessionVisible(summary, list.current, archived)) continue
-    const node = sessionNode(summary, descendants, true)
-    if (!sessionStatusMatches(node, filter)) continue
-    rows.push(node)
+    rows.push(sessionNode(summary, descendants, true))
   }
   return rows
 }
