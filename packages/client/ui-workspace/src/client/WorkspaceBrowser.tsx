@@ -19,8 +19,8 @@ import type {
   SessionId, SessionListState, SessionSearchResultItem, WorkspaceId, WorkspaceView,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import type { WorkspaceBrowserProps } from './contract/slots.ts'
-import type { SessionNode, SessionOrderBy } from './tree.ts'
-import { deriveFlat, deriveGroups, deriveSearchResults, UNGROUPED_KEY } from './tree.ts'
+import type { SessionNode, SessionOrderBy, SessionStatusFilter } from './tree.ts'
+import { deriveFlat, deriveGroups, derivePinnedSessions, deriveSearchResults, UNGROUPED_KEY } from './tree.ts'
 import { ProjectRowItem, SearchResultItem, SessionNodeItem } from './rows/Rows.tsx'
 import { FLAT_SESSION_ORDER_KEY } from './stores.ts'
 import { WorkspacePickFlow } from './WorkspacePicker.tsx'
@@ -37,6 +37,9 @@ const SEARCH_DEBOUNCE_MS = 250
 const SEARCH_QUERY_MAX_CODE_UNITS = 500
 /** Session rows visible per Workspace before the local overflow control. */
 const COLLAPSED_SESSION_LIMIT = 5
+
+/** Reference-stable empty pinned set for legacy persisted states without the field. */
+const NO_PINNED_SESSIONS: readonly SessionId[] = []
 
 /** Keep controlled input and RPC payload inside the session.search wire contract. */
 function sanitizeSearchQuery(value: string): string {
@@ -143,12 +146,14 @@ function nextSessionOrderAccount({
   return { order, updatedAt, changed: orderChanged || timestampsChanged }
 }
 
-/** Grouping and ordering menu; own open state so it resets with the wide chrome. */
-function ViewOptionsMenu({ groupBy, orderBy, onGroupPick, onOrderPick, t }: {
+/** Grouping, ordering, and status-filter menu; own open state so it resets with the wide chrome. */
+function ViewOptionsMenu({ groupBy, orderBy, statusFilter, onGroupPick, onOrderPick, onStatusPick, t }: {
   groupBy: 'workspace' | 'flat'
   orderBy: SessionOrderBy
+  statusFilter: SessionStatusFilter
   onGroupPick: (mode: 'workspace' | 'flat') => void
   onOrderPick: (mode: SessionOrderBy) => void
+  onStatusPick: (mode: SessionStatusFilter) => void
   t: WorkspaceBrowserProps['t']
 }) {
   const [open, setOpen] = useState(false)
@@ -164,11 +169,17 @@ function ViewOptionsMenu({ groupBy, orderBy, onGroupPick, onOrderPick, t }: {
         { type: 'label' as const, id: 'order-by', text: t('orderBy.label') },
         { id: 'manual', label: t('orderBy.manual') },
         { id: 'updated', label: t('orderBy.updated') },
+        { type: 'separator' as const, id: 'status-filter-separator' },
+        { type: 'label' as const, id: 'status-filter', text: t('statusFilter.label') },
+        { id: 'all', label: t('statusFilter.all') },
+        { id: 'running', label: t('statusFilter.running') },
+        { id: 'completed', label: t('statusFilter.completed') },
       ]}
-      selectedIds={[groupBy, orderBy]}
+      selectedIds={[groupBy, orderBy, statusFilter]}
       onSelect={(id) => {
         if (id === 'workspace' || id === 'flat') onGroupPick(id)
         else if (id === 'manual' || id === 'updated') onOrderPick(id)
+        else if (id === 'all' || id === 'running' || id === 'completed') onStatusPick(id)
         setOpen(false)
       }}
       align="end"
@@ -243,13 +254,53 @@ type SessionTreeProps = Pick<
   onSessionArchive: (sessionId: SessionNode['id']) => void
   /** Session order behavior: fixed after edits, or additionally promoted by user activity. */
   orderBy: SessionOrderBy
+  /** Selected session-status filter (view menu). */
+  statusFilter: SessionStatusFilter
+  /** Browser-local pinned set in pin order (newest first). */
+  pinnedSessionIds: readonly SessionId[]
+  /** Toggle a session's pinned state (row menu action). */
+  onSessionPin: (sessionId: SessionNode['id']) => void
+}
+
+/** The Pinned section: caption header plus pinned Session rows above the tree. */
+function PinnedRows({ rows, currentId, open, forkSession, onSessionRename, onSessionArchive, onSessionPin, t }: {
+  rows: readonly SessionNode[]
+  currentId: SessionId | undefined
+  open: (id: SessionNode['id']) => void
+  forkSession: (id: SessionNode['id']) => void
+  onSessionRename: (sessionId: SessionNode['id'], currentTitle: string) => void
+  onSessionArchive: (sessionId: SessionNode['id']) => void
+  onSessionPin: (sessionId: SessionNode['id']) => void
+  t: WorkspaceBrowserProps['t']
+}) {
+  const now = Date.now()
+  return (
+    <div className={css.pinnedSection}>
+      <div className={css.pinnedHeader}>{t('pinned.section')}</div>
+      {rows.map(node => (
+        <SessionNodeItem
+          key={node.id}
+          node={node}
+          currentId={currentId}
+          now={now}
+          onOpen={open}
+          onRename={onSessionRename}
+          onFork={forkSession}
+          onArchive={onSessionArchive}
+          onPin={onSessionPin}
+          t={t}
+        />
+      ))}
+    </div>
+  )
 }
 
 /** The scrolling session tree; unmounting drops the sessions subscription and expand-all state. */
 function SessionTree({
   useSessions, startSession, open, forkSession, workspaces, archivedSessionIds,
   onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive,
-  insertWorkspaceBefore, insertSessionBefore, orderBy,
+  insertWorkspaceBefore, insertSessionBefore, orderBy, statusFilter,
+  pinnedSessionIds, onSessionPin,
   groupExpansion, setGroupExpanded,
   sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, t,
 }: SessionTreeProps) {
@@ -324,8 +375,12 @@ function SessionTree({
       ...(sessionOrderByAccount[UNGROUPED_KEY] === undefined
         ? {}
         : { ungroupedOrder: sessionOrderByAccount[UNGROUPED_KEY] }),
-    }),
-    [list, orderedWorkspaces, archivedSessionIds, expandedGroups, sessionOrderByAccount],
+    }, statusFilter, pinnedSessionIds),
+    [list, orderedWorkspaces, archivedSessionIds, expandedGroups, sessionOrderByAccount, statusFilter, pinnedSessionIds],
+  )
+  const pinnedRows = useMemo(
+    () => derivePinnedSessions(list, archivedSessionIds, pinnedSessionIds, statusFilter),
+    [list, archivedSessionIds, pinnedSessionIds, statusFilter],
   )
   const now = Date.now()
   const commitSessionDrag = (activeDrag: DragState, over: NonNullable<DragState['over']>): void => {
@@ -388,8 +443,20 @@ function SessionTree({
         role="tree"
         aria-label={t('section.sessions')}
       >
-        {groups.length === 0 && (
-          <div className={css.empty}>{t('empty.none')}</div>
+        {pinnedRows.length > 0 && (
+          <PinnedRows
+            rows={pinnedRows}
+            currentId={list.current}
+            open={open}
+            forkSession={forkSession}
+            onSessionRename={onSessionRename}
+            onSessionArchive={onSessionArchive}
+            onSessionPin={onSessionPin}
+            t={t}
+          />
+        )}
+        {groups.length === 0 && pinnedRows.length === 0 && (
+          <div className={css.empty}>{statusFilter === 'all' ? t('empty.none') : t('empty.filtered')}</div>
         )}
         {groups.map((group) => {
           const workspaceId = group.workspaceId
@@ -516,6 +583,7 @@ function SessionTree({
                     onRename={onSessionRename}
                     onFork={forkSession}
                     onArchive={onSessionArchive}
+                    onPin={onSessionPin}
                     drag={dragProps}
                     t={t}
                   />
@@ -545,7 +613,8 @@ function SessionTree({
 /** The flat "In one list" body: every session is one draggable top-level row. */
 function FlatList({
   useSessions, open, forkSession, onSessionRename, onSessionArchive, archivedSessionIds,
-  orderBy, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, t,
+  orderBy, statusFilter, pinnedSessionIds, onSessionPin,
+  sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, t,
 }: Pick<
   SessionTreeProps,
   | 'useSessions'
@@ -555,6 +624,9 @@ function FlatList({
   | 'onSessionArchive'
   | 'archivedSessionIds'
   | 'orderBy'
+  | 'statusFilter'
+  | 'pinnedSessionIds'
+  | 'onSessionPin'
   | 'sessionOrderByAccount'
   | 'sessionUpdatedAtByAccount'
   | 'syncSessionOrderAccount'
@@ -562,9 +634,19 @@ function FlatList({
   | 't'
 >) {
   const list = useSessions(s => s)
+  // The unfiltered rows back the order account so a status filter or a pin
+  // never prunes hidden ids from the persisted flat order.
   const baseRows = useMemo(
     () => deriveFlat(list, archivedSessionIds),
     [list, archivedSessionIds],
+  )
+  const filteredRows = useMemo(
+    () => deriveFlat(list, archivedSessionIds, statusFilter, pinnedSessionIds),
+    [list, archivedSessionIds, statusFilter, pinnedSessionIds],
+  )
+  const pinnedRows = useMemo(
+    () => derivePinnedSessions(list, archivedSessionIds, pinnedSessionIds, statusFilter),
+    [list, archivedSessionIds, pinnedSessionIds, statusFilter],
   )
   const sessionIds = useMemo(() => baseRows.map(row => row.id), [baseRows])
   const previousOrderBy = useRef(orderBy)
@@ -586,14 +668,18 @@ function FlatList({
       syncSessionOrderAccount(FLAT_SESSION_ORDER_KEY, next.order.map(id => id as string), next.updatedAt)
     }
   }, [list, orderBy, sessionOrderByAccount, sessionUpdatedAtByAccount, sessionIds, syncSessionOrderAccount])
+  // The complete reconciled order; visible rows are its filter projection.
+  const orderedIds = useMemo(
+    () => reconciledSessionOrder(sessionIds, sessionOrderByAccount[FLAT_SESSION_ORDER_KEY]),
+    [sessionIds, sessionOrderByAccount],
+  )
   const rows = useMemo(() => {
-    const byId = new Map(baseRows.map(row => [row.id, row]))
-    return reconciledSessionOrder(sessionIds, sessionOrderByAccount[FLAT_SESSION_ORDER_KEY])
-      .flatMap((id) => {
-        const row = byId.get(id)
-        return row === undefined ? [] : [row]
-      })
-  }, [baseRows, sessionOrderByAccount, sessionIds])
+    const byId = new Map(filteredRows.map(row => [row.id, row]))
+    return orderedIds.flatMap((id) => {
+      const row = byId.get(id)
+      return row === undefined ? [] : [row]
+    })
+  }, [filteredRows, orderedIds])
   const [drag, setDrag] = useState<DragState | null>(null)
   const dropCommitted = useRef(false)
   useNativeDragAcceptance(drag !== null)
@@ -608,7 +694,7 @@ function FlatList({
     const sourceIndex = rows.findIndex(row => row.id === activeDrag.sessionId)
     const anchorIndex = anchor === undefined ? rows.length : rows.findIndex(row => row.id === anchor)
     if (sourceIndex !== -1 && (anchorIndex === sourceIndex || anchorIndex === sourceIndex + 1)) return
-    const nextOrder = rows.map(row => row.id).filter(id => id !== activeDrag.sessionId)
+    const nextOrder = orderedIds.filter(id => id !== activeDrag.sessionId)
     const insertAt = anchor === undefined ? nextOrder.length : nextOrder.indexOf(anchor)
     nextOrder.splice(insertAt === -1 ? nextOrder.length : insertAt, 0, activeDrag.sessionId)
     setSessionOrder(FLAT_SESSION_ORDER_KEY, nextOrder.map(id => id as string))
@@ -617,8 +703,20 @@ function FlatList({
   return (
     <div className={clsx(css.treeBody, css.wide)}>
       <div className={clsx(css.list, css.flatList)} role="tree" aria-label={t('section.sessions')}>
-        {rows.length === 0 && (
-          <div className={css.empty}>{t('empty.none')}</div>
+        {pinnedRows.length > 0 && (
+          <PinnedRows
+            rows={pinnedRows}
+            currentId={list.current}
+            open={open}
+            forkSession={forkSession}
+            onSessionRename={onSessionRename}
+            onSessionArchive={onSessionArchive}
+            onSessionPin={onSessionPin}
+            t={t}
+          />
+        )}
+        {rows.length === 0 && pinnedRows.length === 0 && (
+          <div className={css.empty}>{statusFilter === 'all' ? t('empty.none') : t('empty.filtered')}</div>
         )}
         {rows.map((node) => {
           const active = drag !== null
@@ -632,6 +730,7 @@ function FlatList({
               onRename={onSessionRename}
               onFork={forkSession}
               onArchive={onSessionArchive}
+              onPin={onSessionPin}
               flat
               drag={{
                 start: () => {
@@ -769,6 +868,15 @@ export function WorkspaceBrowser({
   const directoryFlowAvailable = useDirectoryFlow(occupied => occupied)
   const groupBy = useStore(s => s.groupBy)
   const orderBy = useStore(s => s.orderBy)
+  // States persisted by older builds predate the filter field (rehydration
+  // replaces the whole value), so the read defaults to 'all'.
+  const statusFilter = useStore(s => s.statusFilter ?? 'all')
+  // Same legacy-state defaulting for the pinned set: older builds persisted
+  // no pinnedSessionIds, and the empty default must be reference-stable.
+  const pinnedSessionIds = useStore(s => s.pinnedSessionIds ?? NO_PINNED_SESSIONS)
+  const onSessionPin = (sessionId: SessionNode['id']) => {
+    actions.setSessionPinned(sessionId, !pinnedSessionIds.includes(sessionId))
+  }
   const groupExpansion = useStore(s => s.groupExpansion)
   const sessionOrderByAccount = useStore(s => s.sessionOrderByAccount)
   const sessionUpdatedAtByAccount = useStore(s => s.sessionUpdatedAtByAccount)
@@ -1042,8 +1150,10 @@ export function WorkspaceBrowser({
             <ViewOptionsMenu
               groupBy={groupBy}
               orderBy={orderBy}
+              statusFilter={statusFilter}
               onGroupPick={(mode) => { actions.setGroupBy(mode) }}
               onOrderPick={(mode) => { actions.setOrderBy(mode) }}
+              onStatusPick={(mode) => { actions.setStatusFilter(mode) }}
               t={t}
             />
           )}
@@ -1126,6 +1236,9 @@ export function WorkspaceBrowser({
                 onSessionRename={onSessionRename} onSessionArchive={onSessionArchive}
                 archivedSessionIds={archivedSessionIds}
                 orderBy={orderBy}
+                statusFilter={statusFilter}
+                pinnedSessionIds={pinnedSessionIds}
+                onSessionPin={onSessionPin}
                 sessionOrderByAccount={sessionOrderByAccount}
                 sessionUpdatedAtByAccount={sessionUpdatedAtByAccount}
                 syncSessionOrderAccount={actions.syncSessionOrderAccount}
@@ -1152,6 +1265,9 @@ export function WorkspaceBrowser({
                 insertWorkspaceBefore={insertWorkspaceBefore}
                 insertSessionBefore={insertSessionBefore}
                 orderBy={orderBy}
+                statusFilter={statusFilter}
+                pinnedSessionIds={pinnedSessionIds}
+                onSessionPin={onSessionPin}
                 t={t}
                 onRenameRequest={(workspaceId, currentTitle) => {
                   setRenameTarget({ workspaceId, currentTitle })

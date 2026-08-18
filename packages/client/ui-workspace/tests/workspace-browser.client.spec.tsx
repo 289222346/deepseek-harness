@@ -130,12 +130,14 @@ describe('WorkspaceBrowser', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '视图选项' }))
     expect(screen.getByText('分组方式')).toBeTruthy() // the menu heading label
-    expect(screen.getByRole('separator')).toBeTruthy()
+    expect(screen.getByText('状态筛选')).toBeTruthy() // the filter heading label
+    expect(screen.getAllByRole('separator')).toHaveLength(2)
     expect(screen.getAllByRole('menuitem').map(item => item.textContent)).toEqual([
-      '按工作区', '单列表', '手动排序', '最近更新',
+      '按工作区', '单列表', '手动排序', '最近更新', '全部', '运行中', '已完成',
     ])
     expect(screen.getByRole('menuitem', { name: '按工作区' }).querySelector('svg')).toBeTruthy()
     expect(screen.getByRole('menuitem', { name: '手动排序' }).querySelector('svg')).toBeTruthy()
+    expect(screen.getByRole('menuitem', { name: '全部' }).querySelector('svg')).toBeTruthy()
     fireEvent.click(screen.getByRole('menuitem', { name: '单列表' }))
     // Store-driven flip: title changes, rows flatten newest-first, headers gone.
     expect(b.store.getSnapshot().groupBy).toBe('flat')
@@ -156,6 +158,193 @@ describe('WorkspaceBrowser', () => {
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.queryByRole('menu')).toBeNull()
     expect(b.store.getSnapshot().groupBy).toBe('workspace')
+  })
+
+  it('filters rows by session status from the view menu in grouped and flat modes', () => {
+    const running = summary('running-s', 3, { running: true })
+    const done = summary('done-s', 2, { completed: true })
+    const idle = summary('idle-s', 1)
+    const sessions = sessionState([running, done, idle])
+    const workspaces = workspaceState([workspace('alpha', ['running-s', 'done-s', 'idle-s'])])
+    const b = mount({ useSessions: hook(sessions), useWorkspaces: hook(workspaces) })
+    fireEvent.click(screen.getByText('alpha'))
+    expect(screen.getAllByRole('treeitem')).toHaveLength(4) // group header + three rows
+
+    fireEvent.click(screen.getByRole('button', { name: '视图选项' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '运行中' }))
+    expect(b.store.getSnapshot().statusFilter).toBe('running')
+    expect(screen.getByText('running-s')).toBeTruthy()
+    expect(screen.queryByText('done-s')).toBeNull()
+    expect(screen.queryByText('idle-s')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: '视图选项' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '已完成' }))
+    expect(b.store.getSnapshot().statusFilter).toBe('completed')
+    expect(screen.queryByText('running-s')).toBeNull()
+    expect(screen.getByText('done-s')).toBeTruthy()
+    expect(screen.getByText('idle-s')).toBeTruthy()
+
+    // Flat presentation applies the same filter.
+    fireEvent.click(screen.getByRole('button', { name: '视图选项' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '运行中' }))
+    fireEvent.click(screen.getByRole('button', { name: '视图选项' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '单列表' }))
+    expect(screen.getByText('running-s')).toBeTruthy()
+    expect(screen.queryByText('done-s')).toBeNull()
+    expect(screen.queryByText('idle-s')).toBeNull()
+
+    // The filter survives a remount through the persisted store.
+    b.view.unmount()
+    const restored = mount({ useSessions: hook(sessions), useWorkspaces: hook(workspaces) })
+    expect(restored.store.getSnapshot().statusFilter).toBe('running')
+    expect(screen.getByText('running-s')).toBeTruthy()
+    expect(screen.queryByText('done-s')).toBeNull()
+    expect(screen.queryByText('idle-s')).toBeNull()
+  })
+
+  it('treats a persisted view state predating the filter field as All', () => {
+    localStorage.setItem('dsh.workspace.view.v5', JSON.stringify({
+      groupBy: 'workspace', orderBy: 'updated',
+      groupExpansion: {}, sessionOrderByAccount: {}, sessionUpdatedAtByAccount: {},
+    }))
+    const running = summary('running-s', 1, { running: true })
+    const idle = summary('idle-s', 0)
+    const b = mount({
+      useSessions: hook(sessionState([running, idle])),
+      useWorkspaces: hook(workspaceState([workspace('alpha', ['running-s', 'idle-s'])])),
+    })
+    // The legacy state has no statusFilter cell: the browser reads All.
+    fireEvent.click(screen.getByText('alpha'))
+    expect(screen.getByText('running-s')).toBeTruthy()
+    expect(screen.getByText('idle-s')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '视图选项' }))
+    expect(screen.getByRole('menuitem', { name: '全部' }).querySelector('svg')).toBeTruthy()
+    expect(b.store.getSnapshot().statusFilter).toBeUndefined()
+  })
+
+  it('shows the filtered empty state when the filter hides every row in both modes', () => {
+    const running = summary('running-s', 1, { running: true })
+    const b = mount({
+      useSessions: hook(sessionState([running])),
+      useWorkspaces: hook(workspaceState([])),
+    })
+    fireEvent.click(screen.getByRole('button', { name: '视图选项' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '已完成' }))
+    expect(b.store.getSnapshot().statusFilter).toBe('completed')
+    expect(screen.getByText('没有符合筛选条件的会话')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: '视图选项' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '单列表' }))
+    expect(screen.getByText('没有符合筛选条件的会话')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: '视图选项' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '全部' }))
+    expect(screen.queryByText('没有符合筛选条件的会话')).toBeNull()
+  })
+
+  it('pins a session into the Pinned section above the workspaces and unpins back to its place', () => {
+    const sessions = sessionState([summary('a', 2), summary('b', 1)])
+    const workspaces = workspaceState([workspace('alpha', ['a', 'b'])])
+    const b = mount({ useSessions: hook(sessions), useWorkspaces: hook(workspaces) })
+    fireEvent.click(screen.getByText('alpha'))
+    expect(screen.getAllByRole('treeitem').map(row => row.textContent)).toEqual([
+      expect.stringContaining('alpha'),
+      expect.stringContaining('a'),
+      expect.stringContaining('b'),
+    ])
+
+    fireEvent.click(screen.getByRole('button', { name: '会话“a”的操作' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '关注' }))
+    expect(b.store.getSnapshot().pinnedSessionIds).toEqual(['a'])
+    expect(screen.getByText('置顶')).toBeTruthy()
+    expect(screen.getAllByRole('treeitem').map(row => row.textContent)).toEqual([
+      expect.stringContaining('a'),
+      expect.stringContaining('alpha'),
+      expect.stringContaining('b'),
+    ])
+
+    // Unpinning from the Pinned section restores the original group position.
+    fireEvent.click(screen.getByRole('button', { name: '会话“a”的操作' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '取消关注' }))
+    expect(b.store.getSnapshot().pinnedSessionIds).toEqual([])
+    expect(screen.queryByText('置顶')).toBeNull()
+    expect(screen.getAllByRole('treeitem').map(row => row.textContent)).toEqual([
+      expect.stringContaining('alpha'),
+      expect.stringContaining('a'),
+      expect.stringContaining('b'),
+    ])
+
+    // The pinned set survives a remount through the persisted store.
+    fireEvent.click(screen.getByRole('button', { name: '会话“b”的操作' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '关注' }))
+    b.view.unmount()
+    const restored = mount({ useSessions: hook(sessions), useWorkspaces: hook(workspaces) })
+    expect(restored.store.getSnapshot().pinnedSessionIds).toEqual(['b'])
+    expect(screen.getByText('置顶')).toBeTruthy()
+    expect(screen.getAllByRole('treeitem')[0]?.textContent).toContain('b')
+  })
+
+  it('renders the Pinned section above the flat list and restores flat positions on unpin', () => {
+    const sessions = sessionState([summary('one', 3), summary('two', 2), summary('three', 1)])
+    const b = mount({ useSessions: hook(sessions), useWorkspaces: hook(workspaceState([])) })
+    fireEvent.click(screen.getByRole('button', { name: '视图选项' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '单列表' }))
+    expect(screen.getAllByRole('treeitem').map(row => row.textContent)).toEqual([
+      expect.stringContaining('one'), expect.stringContaining('two'), expect.stringContaining('three'),
+    ])
+
+    fireEvent.click(screen.getByRole('button', { name: '会话“two”的操作' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '关注' }))
+    expect(screen.getAllByRole('treeitem').map(row => row.textContent)).toEqual([
+      expect.stringContaining('two'), expect.stringContaining('one'), expect.stringContaining('three'),
+    ])
+
+    fireEvent.click(screen.getByRole('button', { name: '会话“two”的操作' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '取消关注' }))
+    expect(screen.getAllByRole('treeitem').map(row => row.textContent)).toEqual([
+      expect.stringContaining('one'), expect.stringContaining('two'), expect.stringContaining('three'),
+    ])
+    // The flat order account keeps every id while a row is pinned.
+    expect(b.store.getSnapshot().sessionOrderByAccount[FLAT_SESSION_ORDER_KEY]).toEqual(['one', 'two', 'three'])
+  })
+
+  it('applies the status filter inside the Pinned section', () => {
+    const running = summary('running-s', 2, { running: true })
+    const idle = summary('idle-s', 1)
+    const sessions = sessionState([running, idle])
+    const b = mount({
+      useSessions: hook(sessions),
+      useWorkspaces: hook(workspaceState([workspace('alpha', ['running-s', 'idle-s'])])),
+    })
+    fireEvent.click(screen.getByText('alpha'))
+    fireEvent.click(screen.getByRole('button', { name: '会话“running-s”的操作' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '关注' }))
+    fireEvent.click(screen.getByRole('button', { name: '会话“idle-s”的操作' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '关注' }))
+    expect(screen.getByText('置顶')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: '视图选项' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '已完成' }))
+    // The running pinned row is hidden; the idle pinned row stays.
+    expect(screen.queryByText('running-s')).toBeNull()
+    expect(screen.getByText('idle-s')).toBeTruthy()
+    expect(b.store.getSnapshot().pinnedSessionIds).toEqual(['idle-s', 'running-s'])
+  })
+
+  it('pins from a legacy persisted state without the pinned field', () => {
+    localStorage.setItem('dsh.workspace.view.v5', JSON.stringify({
+      groupBy: 'workspace', orderBy: 'updated', statusFilter: 'all',
+      groupExpansion: {}, sessionOrderByAccount: {}, sessionUpdatedAtByAccount: {},
+    }))
+    const b = mount({
+      useSessions: hook(sessionState([summary('a', 1)])),
+      useWorkspaces: hook(workspaceState([workspace('alpha', ['a'])])),
+    })
+    fireEvent.click(screen.getByText('alpha'))
+    fireEvent.click(screen.getByRole('button', { name: '会话“a”的操作' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '关注' }))
+    expect(b.store.getSnapshot().pinnedSessionIds).toEqual(['a'])
+    expect(screen.getByText('置顶')).toBeTruthy()
   })
 
   it('persists flat-list drag order locally and applies Last updated within that account', async () => {

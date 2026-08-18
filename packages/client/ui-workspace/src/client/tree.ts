@@ -15,6 +15,9 @@ export const UNGROUPED_KEY = ''
 /** Display label for the ungrouped bucket row. */
 export const UNGROUPED_LABEL = 'Ungrouped'
 
+/** Stable empty pin/order default for callers with no browser-local list. */
+const EMPTY_SESSION_IDS: readonly SessionId[] = []
+
 /** One top-level session row in a group or the flat list. */
 export interface SessionNode {
   id: SessionId
@@ -22,6 +25,8 @@ export interface SessionNode {
   title: string
   /** The provisional blank session (renderer shows the localized New Session title). */
   blank: boolean
+  /** The user pinned the session; it renders in the browser's Pinned section. */
+  pinned: boolean
   /** The runtime Session list reports an interaction awaiting this user. */
   pendingInteraction?: PendingInteractionStatus
   running: boolean
@@ -34,6 +39,27 @@ export interface SessionNode {
 
 /** Session order selected by the Workspace browser. */
 export type SessionOrderBy = 'manual' | 'updated'
+
+/** Session-status filter selections offered by the browser's view menu. */
+export type SessionStatusFilter = 'all' | 'running' | 'completed'
+
+/**
+ * Whether a row satisfies the selected status filter. Activity is the union
+ * of the session's own run, an awaiting user interaction, and running
+ * subagent descendants; 'completed' is the complement over non-blank rows,
+ * so a provisional blank row appears only under 'all'.
+ * @param node - the row facts the filter reads.
+ * @param filter - the selected filter.
+ * @returns whether the row stays visible under that filter.
+ */
+export function sessionStatusMatches(
+  node: Pick<SessionNode, 'running' | 'pendingInteraction' | 'runningSubagentCount' | 'blank'>,
+  filter: SessionStatusFilter,
+): boolean {
+  if (filter === 'all') return true
+  const active = node.running || node.pendingInteraction !== undefined || node.runningSubagentCount > 0
+  return filter === 'running' ? active : !active && !node.blank
+}
 
 /** One workspace group section: header row facts + visible top-level session rows. */
 export interface GroupNode {
@@ -169,13 +195,23 @@ function orderedUngrouped(members: readonly SessionSummary[], stored: readonly s
  * Group Sessions by Host Workspace: one group per entity in stable Host
  * order, with members resolved from sessionIds in their stored order. Sessions
  * outside every Workspace trail in the browser-local Ungrouped order, which
- * falls back to recency before that order is initialized.
+ * falls back to recency before that order is initialized. The status filter
+ * gates membership here (not in the caller) so a filter that hides every
+ * loose Session also drops the browser-local Ungrouped bucket, mirroring the
+ * archive rule; empty real Workspaces keep their header as durable navigation.
+ * Pinned Sessions are excluded everywhere — the Pinned section owns them —
+ * while their account slots stay untouched, so unpinning returns each row to
+ * its original place.
+ * @param matches - session-status filter predicate over visible members.
+ * @param pinned - browser-local pinned set (rows render in the Pinned section).
  */
 function groupByWorkspace(
   list: SessionListState,
   workspaces: readonly WorkspaceView[],
   archived: ReadonlySet<SessionId>,
   ungroupedOrder: readonly string[] | undefined,
+  matches: (session: SessionSummary) => boolean,
+  pinned: ReadonlySet<SessionId>,
 ): Group[] {
   const groups: Group[] = []
   const accounted = new Set<SessionId>()
@@ -185,7 +221,7 @@ function groupByWorkspace(
       const summary = list.byId[id]
       if (summary === undefined) continue // account may lead the list pull; the row appears when the summary lands
       accounted.add(id)
-      if (!sessionVisible(summary, list.current, archived)) continue
+      if (!sessionVisible(summary, list.current, archived) || !matches(summary) || pinned.has(id)) continue
       members.push(summary)
     }
     groups.push(buildGroup(
@@ -196,7 +232,8 @@ function groupByWorkspace(
   const stray = list.ids
     .map(id => list.byId[id])
     .filter((s): s is SessionSummary =>
-      s !== undefined && !accounted.has(s.id) && sessionVisible(s, list.current, archived))
+      s !== undefined && !accounted.has(s.id) && sessionVisible(s, list.current, archived)
+      && matches(s) && !pinned.has(s.id))
   if (stray.length > 0) {
     groups.push(buildGroup(
       UNGROUPED_KEY,
@@ -214,11 +251,13 @@ function groupByWorkspace(
 function sessionNode(
   s: SessionSummary,
   descendants: ReadonlyMap<SessionId, SubagentDescendantSummary>,
+  pinned: boolean,
 ): SessionNode {
   return {
     id: s.id,
     title: sessionTitle(s),
     blank: s.blank,
+    pinned,
     running: s.running,
     runningSubagentCount: descendants.get(s.id)?.runningCount ?? 0,
     completed: s.completed === true,
@@ -239,6 +278,9 @@ function sessionNode(
  * @param workspaces - real workspaces in stable Host order.
  * @param archivedSessionIds - registry-global archive set.
  * @param view - local expansion arrays.
+ * @param filter - selected session-status filter (default: every visible row).
+ * @param pinnedSessionIds - browser-local pinned set (default: none); pinned
+ *   rows render in the Pinned section instead of their group.
  * @returns group sections in render order.
  */
 export function deriveGroups(
@@ -246,16 +288,29 @@ export function deriveGroups(
   workspaces: readonly WorkspaceView[],
   archivedSessionIds: readonly SessionId[],
   view: TreeView,
+  filter: SessionStatusFilter = 'all',
+  pinnedSessionIds: readonly SessionId[] = EMPTY_SESSION_IDS,
 ): GroupNode[] {
   const archived = new Set(archivedSessionIds)
+  const pinned = new Set(pinnedSessionIds)
   const expandedGroups = new Set(view.expandedGroups)
   const descendants = indexSubagentDescendants(list.byId)
+  const matches = (session: SessionSummary): boolean => sessionStatusMatches(
+    {
+      running: session.running,
+      runningSubagentCount: descendants.get(session.id)?.runningCount ?? 0,
+      blank: session.blank,
+      ...(session.pendingInteraction === undefined ? {} : { pendingInteraction: session.pendingInteraction }),
+    },
+    filter,
+  )
   const currentGroup = list.current === undefined
     ? undefined
     : (workspaces.find(w => w.sessionIds.includes(list.current as SessionId))?.workspaceId as string | undefined)
         ?? UNGROUPED_KEY
   const groups: GroupNode[] = []
-  for (const g of groupByWorkspace(list, workspaces, archived, view.ungroupedOrder)) {
+  for (const g of groupByWorkspace(list, workspaces, archived, view.ungroupedOrder, matches, pinned)) {
+    const sessions = g.sessions.map(session => sessionNode(session, descendants, false))
     const expanded = expandedGroups.has(g.key)
     groups.push({
       key: g.key,
@@ -263,13 +318,44 @@ export function deriveGroups(
       cwd: g.cwd,
       createdAt: g.createdAt,
       label: g.label,
-      sessionCount: g.sessions.length,
+      sessionCount: sessions.length,
       expanded,
       containsCurrent: g.key === currentGroup,
-      sessions: expanded ? g.sessions.map(session => sessionNode(session, descendants)) : [],
+      sessions: expanded ? sessions : [],
     })
   }
   return groups
+}
+
+/**
+ * Derive the browser's Pinned section: pinned Sessions in pin order (newest
+ * pin first), restricted to rows that would otherwise be visible — archived,
+ * subagent-origin, blank, and status-filtered rows never appear. The section
+ * is a pure projection: the pinned set and every order account stay untouched.
+ * @param list - sessions list snapshot.
+ * @param archivedSessionIds - registry-global archive set.
+ * @param pinnedSessionIds - browser-local pinned set in pin order.
+ * @param filter - selected session-status filter (default: every visible row).
+ * @returns pinned rows in render order.
+ */
+export function derivePinnedSessions(
+  list: SessionListState,
+  archivedSessionIds: readonly SessionId[],
+  pinnedSessionIds: readonly SessionId[],
+  filter: SessionStatusFilter = 'all',
+): SessionNode[] {
+  const archived = new Set(archivedSessionIds)
+  const descendants = indexSubagentDescendants(list.byId)
+  const rows: SessionNode[] = []
+  for (const id of pinnedSessionIds) {
+    const summary = list.byId[id]
+    // Blank rows carry no menu and can never be pinned; exclude them outright.
+    if (summary === undefined || summary.blank || !sessionVisible(summary, list.current, archived)) continue
+    const node = sessionNode(summary, descendants, true)
+    if (!sessionStatusMatches(node, filter)) continue
+    rows.push(node)
+  }
+  return rows
 }
 
 /**
@@ -279,22 +365,30 @@ export function deriveGroups(
  * (see {@link deriveSearchResults}).
  * @param list - sessions list snapshot.
  * @param archivedSessionIds - registry-global archive set.
+ * @param filter - selected session-status filter (default: every visible row).
+ * @param pinnedSessionIds - browser-local pinned set (default: none); pinned
+ *   rows render in the Pinned section instead of the flat list.
  * @returns flat rows in render order.
  */
 export function deriveFlat(
   list: SessionListState,
   archivedSessionIds: readonly SessionId[],
+  filter: SessionStatusFilter = 'all',
+  pinnedSessionIds: readonly SessionId[] = EMPTY_SESSION_IDS,
 ): SessionNode[] {
   const archived = new Set(archivedSessionIds)
+  const pinned = new Set(pinnedSessionIds)
   const descendants = indexSubagentDescendants(list.byId)
   const rows: SessionSummary[] = []
   for (const id of list.ids) {
     const s = list.byId[id]
-    if (s === undefined || !sessionVisible(s, list.current, archived)) continue
+    if (s === undefined || !sessionVisible(s, list.current, archived) || pinned.has(id)) continue
     rows.push(s)
   }
   rows.sort(byRecency)
-  return rows.map(session => sessionNode(session, descendants))
+  return rows
+    .map(session => sessionNode(session, descendants, false))
+    .filter(node => sessionStatusMatches(node, filter))
 }
 
 /** Relative-time bucket of a session row's trailing label. */

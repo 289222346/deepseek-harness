@@ -870,3 +870,17 @@ export const IconArchiveOutline20 = ({ size = 20, className }: IconProps) => (
     <path d="M12.7962 12.5661V11.0832H7.20548V12.5661L12.7962 12.5661Z" fill="currentColor" />
   </svg>
 )
+
+/** pin_outline_16 (session pin glyph; hand-authored pushpin — round head with a
+ *  hole over a tapering needle, currentColor outline) */
+export const IconPinOutline16 = ({ size = 16, className }: IconProps) => (
+  <svg width={size} height={size} className={className} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path
+      fillRule="evenodd"
+      clipRule="evenodd"
+      d="M8 2.3a3.3 3.3 0 1 0 0.001 0ZM8 4.1a1.5 1.5 0 1 1 -0.001 0Z"
+      fill="currentColor"
+    />
+    <path d="M7.05 8.8L8.95 8.8L8 15.2Z" fill="currentColor" />
+  </svg>
+)

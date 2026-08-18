@@ -3,8 +3,8 @@ import type {
   SessionId, SessionListState, SessionSummary, WorkspaceId, WorkspaceView,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import {
-  deriveFlat, deriveGroups, deriveSearchResults, workspaceLabel, relativeTime,
-  UNGROUPED_KEY, UNGROUPED_LABEL,
+  deriveFlat, deriveGroups, derivePinnedSessions, deriveSearchResults, workspaceLabel, relativeTime,
+  sessionStatusMatches, UNGROUPED_KEY, UNGROUPED_LABEL,
 } from '../src/client/tree.ts'
 import { createWorkspaceViewStore } from '../src/client/stores.ts'
 
@@ -251,6 +251,137 @@ describe('deriveFlat', () => {
   })
 })
 
+describe('sessionStatusMatches', () => {
+  it('treats own run, awaiting interaction, and running descendants as activity', () => {
+    const idle = { running: false, runningSubagentCount: 0, blank: false }
+    expect(sessionStatusMatches(idle, 'all')).toBe(true)
+    expect(sessionStatusMatches(idle, 'running')).toBe(false)
+    expect(sessionStatusMatches(idle, 'completed')).toBe(true)
+    expect(sessionStatusMatches({ ...idle, running: true }, 'running')).toBe(true)
+    expect(sessionStatusMatches({ ...idle, running: true }, 'completed')).toBe(false)
+    const awaiting = { ...idle, pendingInteraction: 'question' as const }
+    expect(sessionStatusMatches(awaiting, 'running')).toBe(true)
+    expect(sessionStatusMatches(awaiting, 'completed')).toBe(false)
+    expect(sessionStatusMatches({ ...idle, runningSubagentCount: 2 }, 'running')).toBe(true)
+    expect(sessionStatusMatches({ ...idle, runningSubagentCount: 2 }, 'completed')).toBe(false)
+  })
+
+  it('keeps blank rows only under all', () => {
+    const blank = { running: false, runningSubagentCount: 0, blank: true }
+    expect(sessionStatusMatches(blank, 'all')).toBe(true)
+    expect(sessionStatusMatches(blank, 'running')).toBe(false)
+    expect(sessionStatusMatches(blank, 'completed')).toBe(false)
+  })
+})
+
+describe('session-status filtering', () => {
+  it('filters grouped rows and counts by activity without changing the group set', () => {
+    const parent = summary('parent', 4)
+    const child = {
+      ...summary('child', 5), parentId: parent.id, origin: 'subagent' as const, running: true,
+    }
+    const running = { ...summary('running', 3), running: true }
+    const awaiting = { ...summary('awaiting', 2), pendingInteraction: 'question' as const }
+    const done = { ...summary('done', 1), completed: true }
+    const idle = summary('idle', 0)
+    const sessions = list(parent, child, running, awaiting, done, idle)
+    const workspaces = [workspace('first', ['parent', 'child', 'running', 'awaiting', 'done', 'idle'])]
+
+    const runningGroups = deriveGroups(sessions, workspaces, noArchive, view(['first']), 'running')
+    expect(runningGroups.map(group => group.key)).toEqual(['first'])
+    expect(runningGroups[0]!.sessions.map(node => node.id)).toEqual([parent.id, running.id, awaiting.id])
+    expect(runningGroups[0]!.sessionCount).toBe(3)
+
+    const completedGroups = deriveGroups(sessions, workspaces, noArchive, view(['first']), 'completed')
+    expect(completedGroups[0]!.sessions.map(node => node.id)).toEqual([done.id, idle.id])
+    expect(completedGroups[0]!.sessionCount).toBe(2)
+
+    const allGroups = deriveGroups(sessions, workspaces, noArchive, view(['first']))
+    expect(allGroups[0]!.sessions.map(node => node.id)).toEqual([parent.id, running.id, awaiting.id, done.id, idle.id])
+  })
+
+  it('filters flat rows by recency and hides the current blank row outside all', () => {
+    const currentBlank = { ...summary('current-blank', 9), blank: true }
+    const running = { ...summary('running', 3), running: true }
+    const done = { ...summary('done', 1), completed: true }
+    const sessions = {
+      ...list(running, done, currentBlank),
+      current: currentBlank.id,
+    }
+    expect(deriveFlat(sessions, noArchive).map(node => node.id)).toEqual([
+      currentBlank.id, running.id, done.id,
+    ])
+    expect(deriveFlat(sessions, noArchive, 'running').map(node => node.id)).toEqual([running.id])
+    expect(deriveFlat(sessions, noArchive, 'completed').map(node => node.id)).toEqual([done.id])
+  })
+
+  it('drops the ungrouped bucket when the filter hides every loose session', () => {
+    const running = { ...summary('running', 1), running: true }
+    const sessions = list(running)
+    expect(deriveGroups(sessions, [], noArchive, view(), 'completed')).toEqual([])
+    expect(deriveGroups(sessions, [], noArchive, view(), 'all')[0]!.key).toBe(UNGROUPED_KEY)
+  })
+})
+
+describe('derivePinnedSessions', () => {
+  it('projects pinned rows in pin order with the pinned flag', () => {
+    const first = summary('first', 1)
+    const second = { ...summary('second', 2), running: true }
+    const sessions = list(second, first)
+    const rows = derivePinnedSessions(sessions, noArchive, [first.id, second.id])
+    expect(rows.map(row => [row.id, row.pinned])).toEqual([
+      [first.id, true], [second.id, true],
+    ])
+    expect(rows[1]).toMatchObject({ running: true })
+  })
+
+  it('never surfaces unknown, archived, subagent-origin, blank, or filtered ids', () => {
+    const owned = summary('owned', 1)
+    const archivedRow = summary('archived', 2)
+    const subagent = { ...summary('subagent', 3), origin: 'subagent' as const }
+    const currentBlank = { ...summary('current-blank', 4), blank: true }
+    const running = { ...summary('running', 5), running: true }
+    const sessions = {
+      ...list(owned, archivedRow, subagent, currentBlank, running),
+      current: currentBlank.id,
+    }
+    const ids = [owned.id, archivedRow.id, subagent.id, currentBlank.id, running.id, sid('missing')]
+    expect(derivePinnedSessions(sessions, archived('archived'), ids).map(row => row.id))
+      .toEqual([owned.id, running.id])
+    expect(derivePinnedSessions(sessions, archived('archived'), ids, 'completed').map(row => row.id))
+      .toEqual([owned.id])
+  })
+})
+
+describe('pinned-session projection', () => {
+  it('pulls pinned rows out of groups and the flat list while accounts keep their slots', () => {
+    const pinned = summary('pinned', 2)
+    const other = summary('other', 1)
+    const loose = summary('loose', 3, '/elsewhere')
+    const sessions = list(loose, pinned, other)
+    const workspaces = [workspace('first', ['pinned', 'other'])]
+    const pins = [pinned.id, loose.id]
+
+    const groups = deriveGroups(sessions, workspaces, noArchive, view(['first', UNGROUPED_KEY]), 'all', pins)
+    expect(groups.map(group => group.key)).toEqual(['first'])
+    expect(groups[0]!.sessions.map(node => [node.id, node.pinned])).toEqual([[other.id, false]])
+    // The loose pinned row dropped the Ungrouped bucket entirely (archive rule).
+    expect(deriveFlat(sessions, noArchive, 'all', pins).map(node => node.id)).toEqual([other.id])
+    // The unpinned projection restores both rows to their accounts.
+    expect(deriveGroups(sessions, workspaces, noArchive, view(['first', UNGROUPED_KEY])).map(group => group.key))
+      .toEqual(['first', UNGROUPED_KEY])
+  })
+
+  it('keeps an empty Workspace header while every member is pinned', () => {
+    const pinned = summary('pinned', 1)
+    const sessions = list(pinned)
+    const groups = deriveGroups(sessions, [workspace('first', ['pinned'])], noArchive, view(), 'all', [pinned.id])
+    expect(groups).toHaveLength(1)
+    expect(groups[0]!.sessionCount).toBe(0)
+    expect(groups[0]!.sessions).toEqual([])
+  })
+})
+
 describe('deriveSearchResults archive filtering', () => {
   it('archived sessions never match — not by title and not via a backend content hit', () => {
     const hit = summary('hit', 2)
@@ -392,16 +523,24 @@ describe('deriveSearchResults', () => {
 })
 
 describe('createWorkspaceViewStore', () => {
-  it('stores grouping, ordering, Workspace expansion, and recent-session view order', () => {
+  it('stores grouping, ordering, status filtering, pinning, Workspace expansion, and recent-session view order', () => {
     const store = createWorkspaceViewStore().create()
     expect(store.getSnapshot().groupBy).toBe('workspace')
     expect(store.getSnapshot().orderBy).toBe('updated')
+    expect(store.getSnapshot().statusFilter).toBe('all')
+    expect(store.getSnapshot().pinnedSessionIds).toEqual([])
+    store.actions.setStatusFilter('running')
+    store.actions.setSessionPinned(sid('one'), true)
+    store.actions.setSessionPinned(sid('two'), true)
+    store.actions.setSessionPinned(sid('one'), false)
     store.actions.setGroupBy('flat')
     store.actions.setOrderBy('updated')
     store.actions.setGroupExpanded('alpha', true)
     store.actions.syncSessionOrderAccount('alpha', ['two', 'one'], { one: 1, two: 2 })
     store.actions.setSessionOrder('alpha', ['one', 'two'])
     expect(store.getSnapshot().groupBy).toBe('flat')
+    expect(store.getSnapshot().statusFilter).toBe('running')
+    expect(store.getSnapshot().pinnedSessionIds).toEqual(['two'])
     expect(store.getSnapshot()).toMatchObject({
       orderBy: 'updated',
       groupExpansion: { alpha: true },

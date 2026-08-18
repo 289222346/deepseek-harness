@@ -378,6 +378,27 @@
   margin-top: 4px;
 }
 
+/* Pinned section: caption header + rows above every Workspace. */
+.pinnedSection {
+  position: relative;
+}
+
+.pinnedSection + .groupSection {
+  margin-top: 4px;
+}
+
+.pinnedHeader {
+  height: 28px;
+  padding: 0 12px 0 28px;
+  font-size: 12px;
+  line-height: 28px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.pinnedSection > * + * {
+  margin-top: 2px;
+}
+
 .listTopDropIndicator,
 .workspaceDropBefore::before,
 .workspaceDropAfter::after {
